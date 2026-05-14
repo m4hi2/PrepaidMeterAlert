@@ -16,6 +16,7 @@ import (
 	"github.com/m4hi2/MeterAlertBot/internal/database/repo"
 	"github.com/m4hi2/MeterAlertBot/internal/datasources"
 	"github.com/m4hi2/MeterAlertBot/internal/datasources/desco"
+	"github.com/m4hi2/MeterAlertBot/internal/datasources/nesco"
 	"github.com/m4hi2/MeterAlertBot/internal/telemetry"
 	"github.com/muesli/coral"
 	"golang.org/x/time/rate"
@@ -72,6 +73,7 @@ func runAlert(cmd *coral.Command, _ []string) error {
 
 	registry := datasources.Registry{
 		models.ProviderCodeDESCO: desco.NewService(cfg.Desco),
+		models.ProviderCodeNESCO: nesco.NewService(cfg.Nesco),
 	}
 
 	if cfg.Telegram.Token == "" {

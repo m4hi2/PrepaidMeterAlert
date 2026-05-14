@@ -14,6 +14,7 @@ import (
 	"github.com/m4hi2/MeterAlertBot/internal/database/repo"
 	"github.com/m4hi2/MeterAlertBot/internal/datasources"
 	"github.com/m4hi2/MeterAlertBot/internal/datasources/desco"
+	"github.com/m4hi2/MeterAlertBot/internal/datasources/nesco"
 	"github.com/m4hi2/MeterAlertBot/internal/telemetry"
 	"github.com/m4hi2/MeterAlertBot/internal/tgbot"
 	"github.com/muesli/coral"
@@ -70,6 +71,7 @@ func runServe(cmd *coral.Command, _ []string) error {
 
 	fetchers := datasources.Registry{
 		models.ProviderCodeDESCO: desco.NewService(cfg.Desco),
+		models.ProviderCodeNESCO: nesco.NewService(cfg.Nesco),
 	}
 
 	bot, err := tgbot.New(cfg.Telegram, userRepo, meterRepo, providerRepo, feedbackRepo, fetchers)

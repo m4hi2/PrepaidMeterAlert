@@ -13,6 +13,7 @@ type Config struct {
 	Log       LogConfig
 	DB        DBConfig
 	Desco     DescoConfig
+	Nesco     NescoConfig
 	Telemetry TelemetryConfig
 	Telegram  TelegramConfig
 }
@@ -46,6 +47,14 @@ type DescoConfig struct {
 	RateLimit  float64
 }
 
+type NescoConfig struct {
+	BasePath   string
+	Timeout    time.Duration
+	Retry      int
+	RetryDelay time.Duration
+	RateLimit  float64
+}
+
 var instance *Config
 
 func Load() *Config {
@@ -63,6 +72,13 @@ func Load() *Config {
 			Retry:      parseInt(getEnv("MA_DESCO_RETRY", "3")),
 			RetryDelay: parseDuration(getEnv("MA_DESCO_RETRY_DELAY", "1s")),
 			RateLimit:  parseFloat(getEnv("MA_DESCO_RATE_LIMIT", "5")),
+		},
+		Nesco: NescoConfig{
+			BasePath:   getEnv("MA_NESCO_BASE_PATH", "https://customer.nesco.gov.bd"),
+			Timeout:    parseDuration(getEnv("MA_NESCO_TIMEOUT", "10s")),
+			Retry:      parseInt(getEnv("MA_NESCO_RETRY", "3")),
+			RetryDelay: parseDuration(getEnv("MA_NESCO_RETRY_DELAY", "1s")),
+			RateLimit:  parseFloat(getEnv("MA_NESCO_RATE_LIMIT", "2")),
 		},
 		Telemetry: TelemetryConfig{
 			Enabled:      parseBool(getEnv("MA_OTEL_ENABLED", "true")),
