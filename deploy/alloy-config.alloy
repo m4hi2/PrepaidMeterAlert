@@ -1,0 +1,81 @@
+// Grafana Alloy config for PrepaidMeterAlert
+// Copy to /etc/alloy/config.alloy on the VPS.
+// Fill in all <placeholder> values from Grafana Cloud:
+//   My Account → Stack → Details  (instance IDs per signal)
+//   Security → API Keys            (create key with publisher scopes)
+
+// ── OTLP receiver: accepts traces + metrics from the app ──────────────────
+otelcol.receiver.otlp "meterbot" {
+  grpc {
+    endpoint = "127.0.0.1:4317"
+  }
+
+  output {
+    traces  = [otelcol.exporter.otlphttp.grafana_cloud.input]
+    metrics = [otelcol.exporter.prometheus.default.input]
+  }
+}
+
+// ── Traces → Grafana Cloud Tempo ──────────────────────────────────────────
+otelcol.auth.basic "grafana_cloud" {
+  username = "<tempo_instance_id>"
+  password = "<api_key>"
+}
+
+otelcol.exporter.otlphttp "grafana_cloud" {
+  client {
+    endpoint = "https://otlp-gateway-prod-<region>.grafana.net/otlp"
+    auth     = otelcol.auth.basic.grafana_cloud.handler
+  }
+}
+
+// ── Metrics → Grafana Cloud Mimir ─────────────────────────────────────────
+otelcol.exporter.prometheus "default" {
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = "https://prometheus-prod-<region>.grafana.net/api/prom/push"
+
+    basic_auth {
+      username = "<prom_instance_id>"
+      password = "<api_key>"
+    }
+  }
+}
+
+// ── Logs → Grafana Cloud Loki (reads from systemd journal) ────────────────
+// One source per unit — avoids OR syntax in matches which Alloy does not support
+loki.source.journal "meterbot_serve" {
+  forward_to = [loki.write.grafana_cloud.receiver]
+  matches    = "_SYSTEMD_UNIT=meterbot-serve.service"
+
+  labels = {
+    app  = "meterbot",
+    env  = "production",
+    unit = "meterbot-serve.service",
+  }
+}
+
+loki.source.journal "meterbot_alert" {
+  forward_to = [loki.write.grafana_cloud.receiver]
+  matches    = "_SYSTEMD_UNIT=meterbot-alert.service"
+
+  labels = {
+    app  = "meterbot",
+    env  = "production",
+    unit = "meterbot-alert.service",
+  }
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = "https://logs-prod-<region>.grafana.net/loki/api/v1/push"
+
+    basic_auth {
+      username = "<loki_instance_id>"
+      password = "<api_key>"
+    }
+  }
+}

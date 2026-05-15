@@ -1,0 +1,33 @@
+name: Deploy
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: GOOS=linux GOARCH=amd64 go build -o meterbot .
+
+      - name: Deploy to VPS
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          echo "$SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          scp -i /tmp/deploy_key -o StrictHostKeyChecking=no \
+            meterbot deploy@$VPS_HOST:/tmp/meterbot.new
+          ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no deploy@$VPS_HOST \
+            "sudo mv /tmp/meterbot.new /opt/meterbot/meterbot && \
+             sudo chmod +x /opt/meterbot/meterbot && \
+             sudo /opt/meterbot/run-migrate.sh && \
+             sudo systemctl restart meterbot-serve"

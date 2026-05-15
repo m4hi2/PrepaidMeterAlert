@@ -1,0 +1,14 @@
+[Unit]
+Description=PrepaidMeterAlert Telegram Bot
+After=network.target postgresql.service alloy.service
+
+[Service]
+Type=simple
+User=meterbot
+EnvironmentFile=/etc/meterbot/.env
+ExecStart=/opt/meterbot/meterbot serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
