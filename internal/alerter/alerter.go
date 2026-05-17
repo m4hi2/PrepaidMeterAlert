@@ -21,13 +21,14 @@ import (
 )
 
 type Alerter struct {
-	meterRepo    repo.MeterRepository
-	userRepo     repo.UserRepository
-	notifLogRepo repo.NotificationLogRepository
-	providerRepo repo.ProviderRepository
-	registry     datasources.Registry
-	bot          *tele.Bot
-	tgLimiter    *rate.Limiter
+	meterRepo             repo.MeterRepository
+	userRepo              repo.UserRepository
+	notifLogRepo          repo.NotificationLogRepository
+	providerRepo          repo.ProviderRepository
+	registry              datasources.Registry
+	bot                   *tele.Bot
+	tgLimiter             *rate.Limiter
+	readingStaleThreshold time.Duration
 
 	tracer          trace.Tracer
 	runDuration     metric.Float64Histogram
@@ -45,6 +46,7 @@ func New(
 	registry datasources.Registry,
 	bot *tele.Bot,
 	tgLimiter *rate.Limiter,
+	readingStaleThreshold time.Duration,
 ) (*Alerter, error) {
 	m := otel.Meter("meterbot/tgbot")
 
@@ -92,14 +94,15 @@ func New(
 	}
 
 	return &Alerter{
-		meterRepo:       meterRepo,
-		userRepo:        userRepo,
-		notifLogRepo:    notifLogRepo,
-		providerRepo:    providerRepo,
-		registry:        registry,
-		bot:             bot,
-		tgLimiter:       tgLimiter,
-		tracer:          otel.Tracer("meterbot/alerter"),
+		meterRepo:             meterRepo,
+		userRepo:              userRepo,
+		notifLogRepo:          notifLogRepo,
+		providerRepo:          providerRepo,
+		registry:              registry,
+		bot:                   bot,
+		tgLimiter:             tgLimiter,
+		readingStaleThreshold: readingStaleThreshold,
+		tracer:                otel.Tracer("meterbot/alerter"),
 		runDuration:     runDuration,
 		fetchSuccess:    fetchSuccess,
 		fetchFailed:     fetchFailed,
@@ -202,6 +205,8 @@ func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher d
 	}
 
 	fetchedBalance := bal.Balance
+
+	a.handleProviderReadingTime(fetchCtx, meter, bal.ReadingTime, now)
 
 	// Recharge detected (balance went up) or recovered above threshold — reset notification episode.
 	if fetchedBalance > prevBalance || fetchedBalance >= meter.Threshold {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/m4hi2/MeterAlertBot/internal/config"
 	"github.com/m4hi2/MeterAlertBot/internal/datasources"
@@ -107,8 +108,16 @@ func (s *Service) callAPI(ctx context.Context, id datasources.Identifier, path, 
 	}
 	outID := id
 	outID.AccountNumber, outID.MeterNumber = resp.Data.AccountNo, resp.Data.MeterNo
+	var readingAt *time.Time
+	if t, err := time.Parse("2006-01-02", resp.Data.ReadingTime); err == nil {
+		readingAt = &t
+	}
 	return apiResult{
-		bal:    datasources.Balance{Identifier: outID, Balance: resp.Data.Balance},
+		bal: datasources.Balance{
+			Identifier:  outID,
+			Balance:     resp.Data.Balance,
+			ReadingTime: readingAt,
+		},
 		source: source,
 	}
 }

@@ -1,5 +1,7 @@
 package datasources
 
+import "time"
+
 type Identifier struct {
 	AccountNumber string
 	MeterNumber   string
@@ -7,7 +9,8 @@ type Identifier struct {
 
 type Balance struct {
 	Identifier
-	Balance float64
+	Balance     float64
+	ReadingTime *time.Time // provider-reported reading timestamp; nil if unavailable
 }
 
 type AccountDetails struct {

@@ -51,8 +51,10 @@ type Meter struct {
 	Nickname           string       `bun:"nickname,nullzero,type:varchar(30)"`
 	Threshold          float64      `bun:"threshold,notnull,default:100"`
 	NotifyMode         NotifyMode   `bun:"notify_mode,notnull,type:varchar(10)"`
-	Balance            float64      `bun:"balance,notnull,default:0"`
-	LastFetchAt        *time.Time   `bun:"last_fetch_at,nullzero"`
-	FetchStatus        FetchStatus  `bun:"fetch_status,notnull,type:varchar(10)"`
-	NotificationStatus NStatus      `bun:"notification_status,notnull,type:varchar(10)"`
+	Balance                float64      `bun:"balance,notnull,default:0"`
+	LastFetchAt            *time.Time   `bun:"last_fetch_at,nullzero"`
+	ProviderReadingAt      *time.Time   `bun:"provider_reading_at,nullzero"`
+	ReadingStaleNotified   bool         `bun:"reading_stale_notified,notnull,default:false"`
+	FetchStatus            FetchStatus  `bun:"fetch_status,notnull,type:varchar(10)"`
+	NotificationStatus     NStatus      `bun:"notification_status,notnull,type:varchar(10)"`
 }
