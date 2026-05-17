@@ -7,6 +7,9 @@ import (
 )
 
 const (
+	// RepoURL is the canonical GitHub repository for issues and contributions.
+	RepoURL = "https://github.com/m4hi2/PrepaidMeterAlert"
+
 	UniqAddMeter           = "add_meter"
 	UniqMyMeters           = "my_meters"
 	UniqHelp               = "help"
@@ -33,6 +36,15 @@ func MainMenu() *tele.ReplyMarkup {
 		),
 		m.Row(m.Data("💬 Feedback", UniqFeedback)),
 		m.Row(m.Data("❓ Help", UniqHelp)),
+	)
+	return m
+}
+
+func HelpMenu() *tele.ReplyMarkup {
+	m := &tele.ReplyMarkup{}
+	m.Inline(
+		m.Row(m.URL("🔗 GitHub repository", RepoURL)),
+		m.Row(m.Data("🏠 Main Menu", UniqNavMain)),
 	)
 	return m
 }
