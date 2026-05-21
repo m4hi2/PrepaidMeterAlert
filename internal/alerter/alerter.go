@@ -230,6 +230,8 @@ func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher d
 		meter.LastReadingAt = bal.ReadingTime
 	}
 
+	stale = a.checkStale(meter)
+
 	a.fetchSuccess.Add(fetchCtx, 1, metric.WithAttributes(providerAttr))
 
 	if updateErr := a.meterRepo.Update(fetchCtx, meter); updateErr != nil {
@@ -237,8 +239,6 @@ func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher d
 			"meter_id", meter.ID, "error", updateErr)
 		return false, nil
 	}
-
-	stale = a.checkStale(meter)
 
 	return fetchedBalance < meter.Threshold, stale
 }
@@ -295,91 +295,15 @@ func (a *Alerter) notifyAll(ctx context.Context, meters []*models.Meter) {
 			continue
 		}
 
-		a.notifyMeter(ctx, meter)
+		a.sendNotification(ctx, &notifParams{
+			meter:       meter,
+			msg:         buildMessage(meter),
+			spanName:    "alerter.notify",
+			updateType:  "notification",
+			notifType:   models.NTypeLowBalance,
+			setStatus:   func(status models.NStatus) { meter.NotificationStatus = status },
+		})
 	}
-}
-
-func (a *Alerter) notifyMeter(ctx context.Context, meter *models.Meter) {
-	user, err := a.userRepo.GetByID(ctx, meter.UserID)
-	if err != nil {
-		slog.ErrorContext(ctx, "failed to get user for notification",
-			"meter_id", meter.ID, "user_id", meter.UserID, "error", err)
-		return
-	}
-
-	chatID, err := strconv.ParseInt(user.PlatformID, 10, 64)
-	if err != nil {
-		slog.ErrorContext(ctx, "invalid platform_id for user",
-			"user_id", user.ID, "platform_id", user.PlatformID, "error", err)
-		return
-	}
-
-	notifAttrs := []attribute.KeyValue{
-		attribute.String("tg.handler", "alerter"),
-		attribute.String("tg.update_type", "notification"),
-		attribute.String("meter.provider", string(meter.ProviderCode)),
-		attribute.String("notify_mode", string(meter.NotifyMode)),
-	}
-
-	notifCtx, notifSpan := a.tracer.Start(ctx, "alerter.notify",
-		trace.WithAttributes(append(notifAttrs,
-			attribute.String("meter.id", meter.ID.String()),
-			attribute.Int64("tg.chat_id", chatID),
-			attribute.Float64("balance", meter.Balance),
-			attribute.Float64("threshold", meter.Threshold),
-		)...),
-	)
-	defer notifSpan.End()
-
-	if err := a.tgLimiter.Wait(notifCtx); err != nil {
-		notifSpan.RecordError(err)
-		notifSpan.SetStatus(codes.Error, err.Error())
-		slog.ErrorContext(notifCtx, "tg rate limiter wait failed",
-			"meter_id", meter.ID, "error", err)
-		return
-	}
-
-	_, sendErr := a.bot.Send(&tele.Chat{ID: chatID}, buildMessage(meter), keyboards.MainMenu())
-	if sendErr != nil {
-		meter.NotificationStatus = models.NStatusFailed
-		notifSpan.RecordError(sendErr)
-		notifSpan.SetStatus(codes.Error, sendErr.Error())
-		slog.ErrorContext(notifCtx, "failed to send notification",
-			"meter_id", meter.ID, "chat_id", chatID, "error", sendErr)
-	} else {
-		meter.NotificationStatus = models.NStatusSuccess
-		a.notifSent.Add(notifCtx, 1, metric.WithAttributes(notifAttrs...))
-		slog.InfoContext(notifCtx, "notification sent",
-			"meter_id", meter.ID, "chat_id", chatID, "balance", meter.Balance)
-
-		if insertErr := a.notifLogRepo.Insert(notifCtx, &models.NotificationLog{
-			UserID:           meter.UserID,
-			MeterID:          meter.ID,
-			Platform:         user.Platform,
-			PlatformID:       user.PlatformID,
-			Balance:          meter.Balance,
-			NotificationType:  models.NTypeLowBalance,
-		}); insertErr != nil {
-			slog.ErrorContext(notifCtx, "failed to insert notification log",
-				"meter_id", meter.ID, "error", insertErr)
-		}
-	}
-
-	if updateErr := a.meterRepo.Update(notifCtx, meter); updateErr != nil {
-		slog.ErrorContext(notifCtx, "failed to update meter notification status",
-			"meter_id", meter.ID, "error", updateErr)
-	}
-}
-
-func buildMessage(meter *models.Meter) string {
-	name := meter.AccountNumber
-	if meter.Nickname != "" {
-		name = meter.Nickname
-	}
-	return fmt.Sprintf(
-		"⚠️ Low Balance Alert\nMeter: %s (%s)\nBalance: %.2f BDT\nThreshold: %.2f BDT",
-		name, meter.ProviderCode, meter.Balance, meter.Threshold,
-	)
 }
 
 func (a *Alerter) notifyAllStale(ctx context.Context, results []*staleResult) {
@@ -393,15 +317,31 @@ func (a *Alerter) notifyAllStale(ctx context.Context, results []*staleResult) {
 			))
 			continue
 		}
-		a.notifyStaleMeter(ctx, sr.meter, sr.readingTime)
+		a.sendNotification(ctx, &notifParams{
+			meter:       sr.meter,
+			msg:         buildStaleMessage(sr.meter, sr.readingTime),
+			spanName:    "alerter.notify_stale",
+			updateType:  "stale_notification",
+			notifType:   models.NTypeStaleReading,
+			setStatus:   func(status models.NStatus) { sr.meter.StaleNotificationStatus = status },
+		})
 	}
 }
 
-func (a *Alerter) notifyStaleMeter(ctx context.Context, meter *models.Meter, readingTime time.Time) {
-	user, err := a.userRepo.GetByID(ctx, meter.UserID)
+type notifParams struct {
+	meter      *models.Meter
+	msg        string
+	spanName   string
+	updateType string
+	notifType  models.NType
+	setStatus  func(models.NStatus)
+}
+
+func (a *Alerter) sendNotification(ctx context.Context, p *notifParams) {
+	user, err := a.userRepo.GetByID(ctx, p.meter.UserID)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to get user for stale notification",
-			"meter_id", meter.ID, "user_id", meter.UserID, "error", err)
+		slog.ErrorContext(ctx, "failed to get user for notification",
+			"meter_id", p.meter.ID, "user_id", p.meter.UserID, "error", err)
 		return
 	}
 
@@ -414,13 +354,13 @@ func (a *Alerter) notifyStaleMeter(ctx context.Context, meter *models.Meter, rea
 
 	notifAttrs := []attribute.KeyValue{
 		attribute.String("tg.handler", "alerter"),
-		attribute.String("tg.update_type", "stale_notification"),
-		attribute.String("meter.provider", string(meter.ProviderCode)),
+		attribute.String("tg.update_type", p.updateType),
+		attribute.String("meter.provider", string(p.meter.ProviderCode)),
 	}
 
-	notifCtx, notifSpan := a.tracer.Start(ctx, "alerter.notify_stale",
+	notifCtx, notifSpan := a.tracer.Start(ctx, p.spanName,
 		trace.WithAttributes(append(notifAttrs,
-			attribute.String("meter.id", meter.ID.String()),
+			attribute.String("meter.id", p.meter.ID.String()),
 			attribute.Int64("tg.chat_id", chatID),
 		)...),
 	)
@@ -430,41 +370,51 @@ func (a *Alerter) notifyStaleMeter(ctx context.Context, meter *models.Meter, rea
 		notifSpan.RecordError(err)
 		notifSpan.SetStatus(codes.Error, err.Error())
 		slog.ErrorContext(notifCtx, "tg rate limiter wait failed",
-			"meter_id", meter.ID, "error", err)
+			"meter_id", p.meter.ID, "error", err)
 		return
 	}
 
-	msg := buildStaleMessage(meter, readingTime)
-	_, sendErr := a.bot.Send(&tele.Chat{ID: chatID}, msg, keyboards.MainMenu())
+	_, sendErr := a.bot.Send(&tele.Chat{ID: chatID}, p.msg, keyboards.MainMenu())
 	if sendErr != nil {
-		meter.StaleNotificationStatus = models.NStatusFailed
+		p.setStatus(models.NStatusFailed)
 		notifSpan.RecordError(sendErr)
 		notifSpan.SetStatus(codes.Error, sendErr.Error())
-		slog.ErrorContext(notifCtx, "failed to send stale notification",
-			"meter_id", meter.ID, "chat_id", chatID, "error", sendErr)
+		slog.ErrorContext(notifCtx, "failed to send notification",
+			"meter_id", p.meter.ID, "chat_id", chatID, "error", sendErr)
 	} else {
-		meter.StaleNotificationStatus = models.NStatusSuccess
+		p.setStatus(models.NStatusSuccess)
 		a.notifSent.Add(notifCtx, 1, metric.WithAttributes(notifAttrs...))
-		slog.InfoContext(notifCtx, "stale notification sent",
-			"meter_id", meter.ID, "chat_id", chatID)
+		slog.InfoContext(notifCtx, "notification sent",
+			"meter_id", p.meter.ID, "chat_id", chatID, "type", p.notifType)
 
 		if insertErr := a.notifLogRepo.Insert(notifCtx, &models.NotificationLog{
-			UserID:           meter.UserID,
-			MeterID:          meter.ID,
+			UserID:           p.meter.UserID,
+			MeterID:          p.meter.ID,
 			Platform:         user.Platform,
 			PlatformID:       user.PlatformID,
-			Balance:          meter.Balance,
-			NotificationType: models.NTypeStaleReading,
+			Balance:          p.meter.Balance,
+			NotificationType: p.notifType,
 		}); insertErr != nil {
-			slog.ErrorContext(notifCtx, "failed to insert stale notification log",
-				"meter_id", meter.ID, "error", insertErr)
+			slog.ErrorContext(notifCtx, "failed to insert notification log",
+				"meter_id", p.meter.ID, "error", insertErr)
 		}
 	}
 
-	if updateErr := a.meterRepo.Update(notifCtx, meter); updateErr != nil {
-		slog.ErrorContext(notifCtx, "failed to update meter stale notification status",
-			"meter_id", meter.ID, "error", updateErr)
+	if updateErr := a.meterRepo.Update(notifCtx, p.meter); updateErr != nil {
+		slog.ErrorContext(notifCtx, "failed to update meter notification status",
+			"meter_id", p.meter.ID, "error", updateErr)
 	}
+}
+
+func buildMessage(meter *models.Meter) string {
+	name := meter.AccountNumber
+	if meter.Nickname != "" {
+		name = meter.Nickname
+	}
+	return fmt.Sprintf(
+		"⚠️ Low Balance Alert\nMeter: %s (%s)\nBalance: %.2f BDT\nThreshold: %.2f BDT",
+		name, meter.ProviderCode, meter.Balance, meter.Threshold,
+	)
 }
 
 func buildStaleMessage(meter *models.Meter, readingTime time.Time) string {

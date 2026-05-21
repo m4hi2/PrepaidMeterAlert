@@ -101,7 +101,7 @@ func (s *Service) fetchFirstBalance(ctx context.Context, id datasources.Identifi
 func (s *Service) callAPI(ctx context.Context, id datasources.Identifier, path, source string) apiResult {
 	var resp GetBalanceResp
 	err := s.client.Do(ctx, http.MethodGet, path+"?"+buildQuery(id), nil, nil, &resp)
-	if err == nil && (resp.Code != http.StatusOK || resp.Data.ReadingTime == "") {
+	if err == nil && resp.Code != http.StatusOK {
 		err = fmt.Errorf("upstream code %d: %s", resp.Code, resp.Desc)
 	}
 	if err != nil {
@@ -132,7 +132,7 @@ func buildQuery(id datasources.Identifier) string {
 
 var readingTimeFormats = []string{
 	"2006-01-02",
-	time.DateOnly,
+	time.DateTime,
 }
 
 func parseReadingTime(raw string) (time.Time, error) {
