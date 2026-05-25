@@ -83,8 +83,9 @@ func (s *Service) GetBalance(ctx context.Context, id datasources.Identifier) (da
 	s.apiHits.Add(ctx, 1, metric.WithAttributes(attribute.String("dpdc.api", "graphql")))
 
 	return datasources.Balance{
-		Identifier: id,
-		Balance:    output.BalanceRemaining,
+		Identifier:  id,
+		Balance:     output.BalanceRemaining,
+		ReadingTime: datasources.ParseReadingTime(output.BalanceLatestDate),
 	}, nil
 }
 

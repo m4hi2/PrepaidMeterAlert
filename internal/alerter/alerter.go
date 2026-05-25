@@ -21,14 +21,14 @@ import (
 )
 
 type Alerter struct {
-	meterRepo       repo.MeterRepository
-	userRepo        repo.UserRepository
-	notifLogRepo    repo.NotificationLogRepository
-	providerRepo    repo.ProviderRepository
-	registry        datasources.Registry
-	bot             *tele.Bot
+	meterRepo      repo.MeterRepository
+	userRepo       repo.UserRepository
+	notifLogRepo   repo.NotificationLogRepository
+	providerRepo   repo.ProviderRepository
+	registry       datasources.Registry
+	bot            *tele.Bot
 	tgLimiter      *rate.Limiter
-	staleThreshold  time.Duration
+	staleThreshold time.Duration
 
 	tracer          trace.Tracer
 	runDuration     metric.Float64Histogram
@@ -152,7 +152,7 @@ func (a *Alerter) Run(ctx context.Context) error {
 }
 
 type staleResult struct {
-	meter  *models.Meter
+	meter       *models.Meter
 	readingTime time.Time
 }
 
@@ -228,6 +228,9 @@ func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher d
 
 	if bal.ReadingTime != nil {
 		meter.LastReadingAt = bal.ReadingTime
+	} else {
+		slog.InfoContext(ctx, "provider returned balance without reading time, staleness check skipped",
+			"provider", meter.ProviderCode, "meter_id", meter.ID)
 	}
 
 	stale = a.checkStale(meter)
@@ -296,12 +299,12 @@ func (a *Alerter) notifyAll(ctx context.Context, meters []*models.Meter) {
 		}
 
 		a.sendNotification(ctx, &notifParams{
-			meter:       meter,
-			msg:         buildMessage(meter),
-			spanName:    "alerter.notify",
-			updateType:  "notification",
-			notifType:   models.NTypeLowBalance,
-			setStatus:   func(status models.NStatus) { meter.NotificationStatus = status },
+			meter:      meter,
+			msg:        buildMessage(meter),
+			spanName:   "alerter.notify",
+			updateType: "notification",
+			notifType:  models.NTypeLowBalance,
+			setStatus:  func(status models.NStatus) { meter.NotificationStatus = status },
 		})
 	}
 }
@@ -318,12 +321,12 @@ func (a *Alerter) notifyAllStale(ctx context.Context, results []*staleResult) {
 			continue
 		}
 		a.sendNotification(ctx, &notifParams{
-			meter:       sr.meter,
-			msg:         buildStaleMessage(sr.meter, sr.readingTime),
-			spanName:    "alerter.notify_stale",
-			updateType:  "stale_notification",
-			notifType:   models.NTypeStaleReading,
-			setStatus:   func(status models.NStatus) { sr.meter.StaleNotificationStatus = status },
+			meter:      sr.meter,
+			msg:        buildStaleMessage(sr.meter, sr.readingTime),
+			spanName:   "alerter.notify_stale",
+			updateType: "stale_notification",
+			notifType:  models.NTypeStaleReading,
+			setStatus:  func(status models.NStatus) { sr.meter.StaleNotificationStatus = status },
 		})
 	}
 }
@@ -428,4 +431,3 @@ func buildStaleMessage(meter *models.Meter, readingTime time.Time) string {
 		name, meter.ProviderCode, readingTime.Format("2006-01-02"), days,
 	)
 }
-

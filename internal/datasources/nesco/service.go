@@ -87,8 +87,9 @@ func (s *Service) GetBalance(ctx context.Context, id datasources.Identifier) (da
 	}
 
 	return datasources.Balance{
-		Identifier: outID,
-		Balance:    balance,
+		Identifier:  outID,
+		Balance:     balance,
+		ReadingTime: datasources.ParseReadingTime(resp.Data.ReadingTime),
 	}, nil
 }
 
@@ -231,16 +232,22 @@ func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, e
 
 	slog.DebugContext(context.Background(), "nesco balance extracted", "data", data)
 
+	if data[ReadingTimeLbl] == "" {
+		slog.DebugContext(ctx, "nesco: last reading date field empty, staleness check disabled")
+	}
+
 	return &NescoBalanceResp{
 		Code: http.StatusOK,
 		Data: struct {
-			AccountNo string `json:"accountNo"`
-			MeterNo   string `json:"meterNo"`
-			Balance   string `json:"balance"`
+			AccountNo   string `json:"accountNo"`
+			MeterNo     string `json:"meterNo"`
+			Balance     string `json:"balance"`
+			ReadingTime string `json:"readingTime"`
 		}{
-			AccountNo: acc,
-			MeterNo:   meter,
-			Balance:   balanceStr,
+			AccountNo:   acc,
+			MeterNo:     meter,
+			Balance:     balanceStr,
+			ReadingTime: data[ReadingTimeLbl],
 		},
 	}, nil
 }
