@@ -31,5 +31,5 @@ func TestNescoService_GetBalance(t *testing.T) {
 	bal, err := svc.GetBalance(ctx, id)
 	require.NoError(t, err)
 	require.NotZero(t, bal.Balance, "balance should be > 0 for test number (or real number)")
-	t.Logf("NESCO Balance for 12345678: %.2f", bal.Balance)
+	t.Logf("NESCO Balance for %v: %.2f", id, bal.Balance)
 }

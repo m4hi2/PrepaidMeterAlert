@@ -330,4 +330,3 @@ func buildMessage(meter *models.Meter) string {
 		name, meter.ProviderCode, meter.Balance, meter.Threshold,
 	)
 }
-

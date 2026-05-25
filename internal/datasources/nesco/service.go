@@ -23,10 +23,9 @@ import (
 const name = "nesco"
 
 type Service struct {
-	client  *http.Client
+	client  *datasources.Client
 	limiter *rate.Limiter
 	apiHits metric.Int64Counter
-	cfg     config.NescoConfig
 }
 
 func NewService(cfg config.NescoConfig) *Service {
@@ -39,13 +38,15 @@ func NewService(cfg config.NescoConfig) *Service {
 	)
 
 	return &Service{
-		client: &http.Client{
-			Timeout: cfg.Timeout,
-			Jar:     jar,
-		},
+		client: datasources.NewClient(&datasources.ClientConfig{
+			BasePath:   cfg.BasePath,
+			Timeout:    cfg.Timeout,
+			Retry:      cfg.Retry,
+			RetryDelay: cfg.RetryDelay,
+			Jar:        jar,
+		}),
 		limiter: rate.NewLimiter(rate.Limit(cfg.RateLimit), 1),
 		apiHits: apiHits,
-		cfg:     cfg,
 	}
 }
 
@@ -97,26 +98,21 @@ func (s *Service) Name() string {
 }
 
 func (s *Service) switchToEnglish(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BasePath+languageEn, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	headers := make(http.Header)
+	headers.Set("Accept-Language", "en-US,en;q=0.9")
 
-	resp, err := s.client.Do(req)
+	resp, err := s.client.DoRaw(ctx, http.MethodGet, languageEn, headers, nil)
 	if err != nil {
 		return fmt.Errorf("language switch request: %w", err)
 	}
 	defer resp.Body.Close()
-
 	return nil
 }
 
 func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BasePath+panelPath, nil)
-	resp, err := s.client.Do(req)
+	resp, err := s.client.DoRaw(ctx, http.MethodGet, panelPath, nil, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("get csrf token request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -162,20 +158,17 @@ func (s *Service) fetchBalance(ctx context.Context, custNo, token string) (*Nesc
 	form.Set(paramCustNo, custNo)
 	form.Set(paramSubmit, submitRecharge)
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.cfg.BasePath+panelPath, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	slog.DebugContext(ctx, "nesco posting for balance", "cust_no", custNo)
-
-	resp, err := s.client.Do(req)
+	resp, err := s.client.DoRaw(ctx, http.MethodPost, panelPath, headers, []byte(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("post request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
+		return nil, fmt.Errorf("unexpected upstream status %d", resp.StatusCode)
 	}
 
 	return parseBalancePage(ctx, resp.Body)
