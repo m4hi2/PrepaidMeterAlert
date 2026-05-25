@@ -1,9 +1,10 @@
 package nesco
 
 const (
-	AccountNumber = "Consumer No."
-	MeterNumber   = "Meter No."
-	Balance       = "Remaining Balance (Tk.)"
+	AccountNumber  = "Consumer No."
+	MeterNumber    = "Meter No."
+	Balance        = "Remaining Balance (Tk.)"
+	ReadingTimeLbl = "Last Reading Date"
 )
 
 const (
@@ -19,8 +20,9 @@ type NescoBalanceResp struct {
 	Code int    `json:"code"`
 	Desc string `json:"desc"`
 	Data struct {
-		AccountNo string `json:"accountNo"`
-		MeterNo   string `json:"meterNo"`
-		Balance   string `json:"balance"`
+		AccountNo   string `json:"accountNo"`
+		MeterNo     string `json:"meterNo"`
+		Balance     string `json:"balance"`
+		ReadingTime string `json:"readingTime"`
 	} `json:"data"`
 }

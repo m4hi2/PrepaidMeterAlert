@@ -10,13 +10,14 @@ import (
 )
 
 type Config struct {
-	Log       LogConfig
-	DB        DBConfig
-	Desco     DescoConfig
-	Nesco     NescoConfig
-	Dpdc      DpdcConfig
-	Telemetry TelemetryConfig
-	Telegram  TelegramConfig
+	Log            LogConfig
+	DB             DBConfig
+	Desco          DescoConfig
+	Nesco          NescoConfig
+	Dpdc           DpdcConfig
+	Telemetry      TelemetryConfig
+	Telegram       TelegramConfig
+	StaleThreshold time.Duration
 }
 
 type TelegramConfig struct {
@@ -110,6 +111,7 @@ func Load() *Config {
 			Token:     getEnv("MA_TELEGRAM_TOKEN", ""),
 			RateLimit: parseFloat(getEnv("MA_TELEGRAM_RATE_LIMIT", "30")),
 		},
+		StaleThreshold: parseDuration(getEnv("MA_STALE_THRESHOLD", "168h")),
 	}
 	return instance
 }

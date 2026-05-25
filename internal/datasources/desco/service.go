@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/m4hi2/MeterAlertBot/internal/config"
 	"github.com/m4hi2/MeterAlertBot/internal/datasources"
@@ -99,7 +101,7 @@ func (s *Service) fetchFirstBalance(ctx context.Context, id datasources.Identifi
 func (s *Service) callAPI(ctx context.Context, id datasources.Identifier, path, source string) apiResult {
 	var resp GetBalanceResp
 	err := s.client.Do(ctx, http.MethodGet, path+"?"+buildQuery(id), nil, nil, &resp)
-	if err == nil && (resp.Code != http.StatusOK || resp.Data.ReadingTime == "") {
+	if err == nil && resp.Code != http.StatusOK {
 		err = fmt.Errorf("upstream code %d: %s", resp.Code, resp.Desc)
 	}
 	if err != nil {
@@ -107,8 +109,16 @@ func (s *Service) callAPI(ctx context.Context, id datasources.Identifier, path, 
 	}
 	outID := id
 	outID.AccountNumber, outID.MeterNumber = resp.Data.AccountNo, resp.Data.MeterNo
+
+	var readingTime *time.Time
+	if t, parseErr := parseReadingTime(resp.Data.ReadingTime); parseErr == nil {
+		readingTime = &t
+	} else {
+		slog.DebugContext(ctx, "desco: could not parse reading time", "raw", resp.Data.ReadingTime, "error", parseErr)
+	}
+
 	return apiResult{
-		bal:    datasources.Balance{Identifier: outID, Balance: resp.Data.Balance},
+		bal:    datasources.Balance{Identifier: outID, Balance: resp.Data.Balance, ReadingTime: readingTime},
 		source: source,
 	}
 }
@@ -118,4 +128,18 @@ func buildQuery(id datasources.Identifier) string {
 	q.Set(paramAccountNo, id.AccountNumber)
 	q.Set(paramMeterNo, id.MeterNumber)
 	return q.Encode()
+}
+
+var readingTimeFormats = []string{
+	"2006-01-02",
+	time.DateTime,
+}
+
+func parseReadingTime(raw string) (time.Time, error) {
+	for _, f := range readingTimeFormats {
+		if t, err := time.Parse(f, raw); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported reading time format: %q", raw)
 }

@@ -21,13 +21,14 @@ import (
 )
 
 type Alerter struct {
-	meterRepo    repo.MeterRepository
-	userRepo     repo.UserRepository
-	notifLogRepo repo.NotificationLogRepository
-	providerRepo repo.ProviderRepository
-	registry     datasources.Registry
-	bot          *tele.Bot
-	tgLimiter    *rate.Limiter
+	meterRepo      repo.MeterRepository
+	userRepo       repo.UserRepository
+	notifLogRepo   repo.NotificationLogRepository
+	providerRepo   repo.ProviderRepository
+	registry       datasources.Registry
+	bot            *tele.Bot
+	tgLimiter      *rate.Limiter
+	staleThreshold time.Duration
 
 	tracer          trace.Tracer
 	runDuration     metric.Float64Histogram
@@ -45,6 +46,7 @@ func New(
 	registry datasources.Registry,
 	bot *tele.Bot,
 	tgLimiter *rate.Limiter,
+	staleThreshold time.Duration,
 ) (*Alerter, error) {
 	m := otel.Meter("meterbot/tgbot")
 
@@ -99,6 +101,7 @@ func New(
 		registry:        registry,
 		bot:             bot,
 		tgLimiter:       tgLimiter,
+		staleThreshold:  staleThreshold,
 		tracer:          otel.Tracer("meterbot/alerter"),
 		runDuration:     runDuration,
 		fetchSuccess:    fetchSuccess,
@@ -138,17 +141,24 @@ func (a *Alerter) Run(ctx context.Context) error {
 	}
 
 	slog.InfoContext(ctx, "alerter fetching balances", "total_meters", len(meters))
-	toNotify := a.fetchAll(ctx, meters, activeSet)
-	slog.InfoContext(ctx, "alerter fetch complete", "to_notify", len(toNotify))
+	toNotify, toStaleNotify := a.fetchAll(ctx, meters, activeSet)
+	slog.InfoContext(ctx, "alerter fetch complete", "to_notify", len(toNotify), "to_stale_notify", len(toStaleNotify))
 
 	a.notifyAll(ctx, toNotify)
+	a.notifyAllStale(ctx, toStaleNotify)
 
 	slog.InfoContext(ctx, "alerter run complete")
 	return nil
 }
 
-func (a *Alerter) fetchAll(ctx context.Context, meters []*models.Meter, activeSet map[models.ProviderCode]struct{}) []*models.Meter {
+type staleResult struct {
+	meter       *models.Meter
+	readingTime time.Time
+}
+
+func (a *Alerter) fetchAll(ctx context.Context, meters []*models.Meter, activeSet map[models.ProviderCode]struct{}) ([]*models.Meter, []*staleResult) {
 	var toNotify []*models.Meter
+	var toStaleNotify []*staleResult
 	for _, meter := range meters {
 		if _, active := activeSet[meter.ProviderCode]; !active {
 			slog.DebugContext(ctx, "skipping meter: provider not active",
@@ -161,14 +171,18 @@ func (a *Alerter) fetchAll(ctx context.Context, meters []*models.Meter, activeSe
 				"meter_id", meter.ID, "provider", meter.ProviderCode)
 			continue
 		}
-		if needsNotify := a.fetchMeter(ctx, meter, fetcher); needsNotify {
+		needsNotify, stale := a.fetchMeter(ctx, meter, fetcher)
+		if needsNotify {
 			toNotify = append(toNotify, meter)
 		}
+		if stale != nil {
+			toStaleNotify = append(toStaleNotify, stale)
+		}
 	}
-	return toNotify
+	return toNotify, toStaleNotify
 }
 
-func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher datasources.DataFetcher) (needsNotify bool) {
+func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher datasources.DataFetcher) (needsNotify bool, stale *staleResult) {
 	providerAttr := attribute.String("meter.provider", string(meter.ProviderCode))
 	fetchCtx, fetchSpan := a.tracer.Start(ctx, "alerter.fetch",
 		trace.WithAttributes(
@@ -198,7 +212,7 @@ func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher d
 			slog.ErrorContext(fetchCtx, "failed to update meter fetch status",
 				"meter_id", meter.ID, "error", updateErr)
 		}
-		return false
+		return false, nil
 	}
 
 	fetchedBalance := bal.Balance
@@ -211,15 +225,50 @@ func (a *Alerter) fetchMeter(ctx context.Context, meter *models.Meter, fetcher d
 	meter.Balance = fetchedBalance
 	meter.LastFetchAt = &now
 	meter.FetchStatus = models.FetchStatusSuccess
+
+	if bal.ReadingTime != nil {
+		meter.LastReadingAt = bal.ReadingTime
+	} else {
+		slog.InfoContext(ctx, "provider returned balance without reading time, staleness check skipped",
+			"provider", meter.ProviderCode, "meter_id", meter.ID)
+	}
+
+	stale = a.checkStale(meter)
+
 	a.fetchSuccess.Add(fetchCtx, 1, metric.WithAttributes(providerAttr))
 
 	if updateErr := a.meterRepo.Update(fetchCtx, meter); updateErr != nil {
 		slog.ErrorContext(fetchCtx, "failed to update meter balance",
 			"meter_id", meter.ID, "error", updateErr)
-		return false
+		return false, nil
 	}
 
-	return fetchedBalance < meter.Threshold
+	return fetchedBalance < meter.Threshold, stale
+}
+
+func (a *Alerter) checkStale(meter *models.Meter) *staleResult {
+	if a.staleThreshold <= 0 {
+		return nil
+	}
+
+	if meter.LastReadingAt == nil {
+		return nil
+	}
+
+	now := time.Now()
+
+	if meter.LastReadingAt.After(now) {
+		meter.StaleNotificationStatus = models.NStatusNotNeeded
+		return nil
+	}
+
+	readingAge := now.Sub(*meter.LastReadingAt)
+	if readingAge <= a.staleThreshold {
+		meter.StaleNotificationStatus = models.NStatusNotNeeded
+		return nil
+	}
+
+	return &staleResult{meter: meter, readingTime: *meter.LastReadingAt}
 }
 
 func needsNotification(meter *models.Meter) bool {
@@ -231,6 +280,10 @@ func needsNotification(meter *models.Meter) bool {
 	default:
 		return false
 	}
+}
+
+func needsStaleNotification(meter *models.Meter) bool {
+	return meter.StaleNotificationStatus != models.NStatusSuccess
 }
 
 func (a *Alerter) notifyAll(ctx context.Context, meters []*models.Meter) {
@@ -245,15 +298,53 @@ func (a *Alerter) notifyAll(ctx context.Context, meters []*models.Meter) {
 			continue
 		}
 
-		a.notifyMeter(ctx, meter)
+		a.sendNotification(ctx, &notifParams{
+			meter:      meter,
+			msg:        buildMessage(meter),
+			spanName:   "alerter.notify",
+			updateType: "notification",
+			notifType:  models.NTypeLowBalance,
+			setStatus:  func(status models.NStatus) { meter.NotificationStatus = status },
+		})
 	}
 }
 
-func (a *Alerter) notifyMeter(ctx context.Context, meter *models.Meter) {
-	user, err := a.userRepo.GetByID(ctx, meter.UserID)
+func (a *Alerter) notifyAllStale(ctx context.Context, results []*staleResult) {
+	for _, sr := range results {
+		if !needsStaleNotification(sr.meter) {
+			slog.DebugContext(ctx, "stale notification suppressed",
+				"meter_id", sr.meter.ID, "stale_notification_status", sr.meter.StaleNotificationStatus)
+			a.notifSuppressed.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("meter.provider", string(sr.meter.ProviderCode)),
+				attribute.String("notification_type", "stale_reading"),
+			))
+			continue
+		}
+		a.sendNotification(ctx, &notifParams{
+			meter:      sr.meter,
+			msg:        buildStaleMessage(sr.meter, sr.readingTime),
+			spanName:   "alerter.notify_stale",
+			updateType: "stale_notification",
+			notifType:  models.NTypeStaleReading,
+			setStatus:  func(status models.NStatus) { sr.meter.StaleNotificationStatus = status },
+		})
+	}
+}
+
+type notifParams struct {
+	meter      *models.Meter
+	msg        string
+	spanName   string
+	updateType string
+	notifType  models.NType
+	setStatus  func(models.NStatus)
+}
+
+func (a *Alerter) sendNotification(ctx context.Context, p *notifParams) {
+	user, err := a.userRepo.GetByID(ctx, p.meter.UserID)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to get user for notification",
-			"meter_id", meter.ID, "user_id", meter.UserID, "error", err)
+			"meter_id", p.meter.ID, "user_id", p.meter.UserID, "error", err)
 		return
 	}
 
@@ -266,17 +357,14 @@ func (a *Alerter) notifyMeter(ctx context.Context, meter *models.Meter) {
 
 	notifAttrs := []attribute.KeyValue{
 		attribute.String("tg.handler", "alerter"),
-		attribute.String("tg.update_type", "notification"),
-		attribute.String("meter.provider", string(meter.ProviderCode)),
-		attribute.String("notify_mode", string(meter.NotifyMode)),
+		attribute.String("tg.update_type", p.updateType),
+		attribute.String("meter.provider", string(p.meter.ProviderCode)),
 	}
 
-	notifCtx, notifSpan := a.tracer.Start(ctx, "alerter.notify",
+	notifCtx, notifSpan := a.tracer.Start(ctx, p.spanName,
 		trace.WithAttributes(append(notifAttrs,
-			attribute.String("meter.id", meter.ID.String()),
+			attribute.String("meter.id", p.meter.ID.String()),
 			attribute.Int64("tg.chat_id", chatID),
-			attribute.Float64("balance", meter.Balance),
-			attribute.Float64("threshold", meter.Threshold),
 		)...),
 	)
 	defer notifSpan.End()
@@ -285,38 +373,39 @@ func (a *Alerter) notifyMeter(ctx context.Context, meter *models.Meter) {
 		notifSpan.RecordError(err)
 		notifSpan.SetStatus(codes.Error, err.Error())
 		slog.ErrorContext(notifCtx, "tg rate limiter wait failed",
-			"meter_id", meter.ID, "error", err)
+			"meter_id", p.meter.ID, "error", err)
 		return
 	}
 
-	_, sendErr := a.bot.Send(&tele.Chat{ID: chatID}, buildMessage(meter), keyboards.MainMenu())
+	_, sendErr := a.bot.Send(&tele.Chat{ID: chatID}, p.msg, keyboards.MainMenu())
 	if sendErr != nil {
-		meter.NotificationStatus = models.NStatusFailed
+		p.setStatus(models.NStatusFailed)
 		notifSpan.RecordError(sendErr)
 		notifSpan.SetStatus(codes.Error, sendErr.Error())
 		slog.ErrorContext(notifCtx, "failed to send notification",
-			"meter_id", meter.ID, "chat_id", chatID, "error", sendErr)
+			"meter_id", p.meter.ID, "chat_id", chatID, "error", sendErr)
 	} else {
-		meter.NotificationStatus = models.NStatusSuccess
+		p.setStatus(models.NStatusSuccess)
 		a.notifSent.Add(notifCtx, 1, metric.WithAttributes(notifAttrs...))
 		slog.InfoContext(notifCtx, "notification sent",
-			"meter_id", meter.ID, "chat_id", chatID, "balance", meter.Balance)
+			"meter_id", p.meter.ID, "chat_id", chatID, "type", p.notifType)
 
 		if insertErr := a.notifLogRepo.Insert(notifCtx, &models.NotificationLog{
-			UserID:     meter.UserID,
-			MeterID:    meter.ID,
-			Platform:   user.Platform,
-			PlatformID: user.PlatformID,
-			Balance:    meter.Balance,
+			UserID:           p.meter.UserID,
+			MeterID:          p.meter.ID,
+			Platform:         user.Platform,
+			PlatformID:       user.PlatformID,
+			Balance:          p.meter.Balance,
+			NotificationType: p.notifType,
 		}); insertErr != nil {
 			slog.ErrorContext(notifCtx, "failed to insert notification log",
-				"meter_id", meter.ID, "error", insertErr)
+				"meter_id", p.meter.ID, "error", insertErr)
 		}
 	}
 
-	if updateErr := a.meterRepo.Update(notifCtx, meter); updateErr != nil {
+	if updateErr := a.meterRepo.Update(notifCtx, p.meter); updateErr != nil {
 		slog.ErrorContext(notifCtx, "failed to update meter notification status",
-			"meter_id", meter.ID, "error", updateErr)
+			"meter_id", p.meter.ID, "error", updateErr)
 	}
 }
 
@@ -331,3 +420,14 @@ func buildMessage(meter *models.Meter) string {
 	)
 }
 
+func buildStaleMessage(meter *models.Meter, readingTime time.Time) string {
+	name := meter.AccountNumber
+	if meter.Nickname != "" {
+		name = meter.Nickname
+	}
+	days := int(time.Since(readingTime).Hours() / 24)
+	return fmt.Sprintf(
+		"⏰ Stale Reading Alert\nMeter: %s (%s)\nLast provider reading: %s (%d day(s) ago)\n\nThe provider may not be updating this meter. Check your balance manually.",
+		name, meter.ProviderCode, readingTime.Format("2006-01-02"), days,
+	)
+}

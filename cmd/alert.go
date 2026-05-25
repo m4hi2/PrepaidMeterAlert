@@ -88,7 +88,7 @@ func runAlert(cmd *coral.Command, _ []string) error {
 
 	tgLimiter := rate.NewLimiter(rate.Limit(cfg.Telegram.RateLimit), int(cfg.Telegram.RateLimit))
 
-	a, err := alerter.New(meterRepo, userRepo, notifLogRepo, providerRepo, registry, bot, tgLimiter)
+	a, err := alerter.New(meterRepo, userRepo, notifLogRepo, providerRepo, registry, bot, tgLimiter, cfg.StaleThreshold)
 	if err != nil {
 		return err
 	}
